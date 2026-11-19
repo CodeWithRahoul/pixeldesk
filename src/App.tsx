@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CircleHelp,
   Download,
+  Crop,
   Expand,
   FileImage,
   ImagePlus,
@@ -16,6 +17,7 @@ import {
   Menu,
   Plus,
   ScanLine,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -27,14 +29,17 @@ import JSZip from 'jszip';
 import {
   download,
   formatBytes,
+  hasEdits,
   MAX_FILES,
   processImage,
   readImage,
   sampleImages,
 } from './image';
-import type { ImageItem, Settings } from './image';
+import type { Edits, ImageItem, Settings } from './image';
+import { DEFAULTS, initialSettings } from './settings';
+import AdvancedSettings from './AdvancedSettings';
+import EditorDialog from './EditorDialog';
 
-const DEFAULTS: Settings = { format: 'webp', quality: 82, maxWidth: 1600 };
 const presets = [
   {
     id: 'web',
@@ -48,7 +53,12 @@ const presets = [
     title: 'For social',
     detail: 'Ready to share',
     icon: Layers3,
-    settings: { format: 'jpeg', quality: 90, maxWidth: 1080 } as Settings,
+    settings: {
+      ...DEFAULTS,
+      format: 'jpeg',
+      quality: 90,
+      maxWidth: 1080,
+    } as Settings,
   },
   {
     id: 'custom',
@@ -58,26 +68,6 @@ const presets = [
     settings: null,
   },
 ];
-
-function initialSettings(): Settings {
-  try {
-    const saved = JSON.parse(
-      localStorage.getItem('pixeldesk-settings') || 'null',
-    );
-    if (
-      saved &&
-      ['webp', 'jpeg', 'png'].includes(saved.format) &&
-      Number.isFinite(saved.quality) &&
-      saved.quality >= 10 &&
-      saved.quality <= 100 &&
-      [0, 800, 1080, 1600, 1920, 2560].includes(saved.maxWidth)
-    )
-      return saved;
-  } catch {
-    /* Storage can be unavailable in private or restricted contexts. */
-  }
-  return DEFAULTS;
-}
 
 function App() {
   const [settings, setSettings] = useState<Settings>(initialSettings);
@@ -92,6 +82,10 @@ function App() {
     );
   });
   const [items, setItems] = useState<ImageItem[]>([]);
+  const [customWidth, setCustomWidth] = useState(
+    () =>
+      ![0, 800, 1080, 1600, 1920, 2560].includes(initialSettings().maxWidth),
+  );
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [zipping, setZipping] = useState(false);
@@ -102,9 +96,15 @@ function App() {
   const [split, setSplit] = useState(50);
   const [help, setHelp] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState('added');
+  const [stopping, setStopping] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const currentItems = useRef(items);
   const importLock = useRef(false);
+  const nextExportIndex = useRef(0);
+  const cancelBatch = useRef(false);
   const helpRef = useRef<HTMLDialogElement>(null);
   const compareRef = useRef<HTMLDialogElement>(null);
   currentItems.current = items;
@@ -143,8 +143,32 @@ function App() {
   const saved = beforeBytes - afterBytes;
   const compare = items.find((item) => item.id === compareId);
   const locked = busy || loading || zipping;
+  const editing = items.find((item) => item.id === editId);
+  const visibleItems = items
+    .filter((item) =>
+      item.file.name.toLowerCase().includes(query.toLowerCase()),
+    )
+    .sort((a, b) =>
+      sort === 'name'
+        ? a.file.name.localeCompare(b.file.name)
+        : sort === 'size'
+          ? b.file.size - a.file.size
+          : 0,
+    );
+
+  function applyEdits(edits: Edits) {
+    setItems((previous) =>
+      previous.map((item) => {
+        if (item.id !== editId) return item;
+        if (item.output) URL.revokeObjectURL(item.output.url);
+        return { ...item, edits, output: undefined, error: undefined };
+      }),
+    );
+    setEditId(null);
+  }
 
   function updateSettings(next: Settings, presetId = 'custom') {
+    if (presetId !== 'custom') setCustomWidth(false);
     setSettings(next);
     setPreset(presetId);
     setItems((previous) =>
@@ -171,7 +195,9 @@ function App() {
     const incoming: ImageItem[] = [];
     for (const file of files.slice(0, available)) {
       try {
-        incoming.push(await readImage(file));
+        const item = await readImage(file);
+        item.exportIndex = nextExportIndex.current++;
+        incoming.push(item);
       } catch (error) {
         messages.push(
           error instanceof Error ? error.message : 'Could not read this file.',
@@ -214,19 +240,27 @@ function App() {
       if (item.output) URL.revokeObjectURL(item.output.url);
     }
     setItems([]);
+    setQuery('');
+    nextExportIndex.current = 0;
     setNotice('');
   }
 
   async function optimize() {
     if (locked || !items.length) return;
     setBusy(true);
+    cancelBatch.current = false;
+    setStopping(false);
     setProgress(0);
     setNotice('');
     let failures = 0;
     for (const [index, item] of items.entries()) {
+      if (cancelBatch.current) break;
+      if (item.output) {
+        setProgress(index + 1);
+        continue;
+      }
       try {
-        const output = await processImage(item, settings, index);
-        if (item.output) URL.revokeObjectURL(item.output.url);
+        const output = await processImage(item, settings, item.exportIndex);
         setItems((previous) =>
           previous.map((entry) =>
             entry.id === item.id
@@ -254,7 +288,12 @@ function App() {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     setBusy(false);
-    if (failures)
+    setStopping(false);
+    if (cancelBatch.current)
+      setNotice(
+        'Batch stopped. Finished images are ready to download. Optimize again to continue the remaining images.',
+      );
+    else if (failures)
       setNotice(
         `${failures} image${failures > 1 ? 's' : ''} could not be processed. Check the message beside each image.`,
       );
@@ -344,7 +383,7 @@ function App() {
               <span>A little lighter.</span>
             </h1>
             <p>
-              Resize, compress, and convert in a few clicks.
+              Edit, watermark, and optimize in a few clicks.
               <br className="desktop-break" /> All in your browser. All yours.
             </p>
             <div className="hero-chips">
@@ -496,13 +535,24 @@ function App() {
                 <div className="select-wrap">
                   <select
                     id="width"
-                    value={settings.maxWidth}
-                    onChange={(event) =>
+                    value={
+                      customWidth ||
+                      ![0, 800, 1080, 1600, 1920, 2560].includes(
+                        settings.maxWidth,
+                      )
+                        ? 'custom'
+                        : settings.maxWidth
+                    }
+                    onChange={(event) => {
+                      setCustomWidth(event.target.value === 'custom');
                       updateSettings({
                         ...settings,
-                        maxWidth: Number(event.target.value),
-                      })
-                    }
+                        maxWidth:
+                          event.target.value === 'custom'
+                            ? 1200
+                            : Number(event.target.value),
+                      });
+                    }}
                   >
                     <option value="0">Keep original size</option>
                     <option value="800">800 px</option>
@@ -510,13 +560,42 @@ function App() {
                     <option value="1600">1600 px</option>
                     <option value="1920">1920 px</option>
                     <option value="2560">2560 px</option>
+                    <option value="custom">Custom width</option>
                   </select>
                   <ChevronDown size={16} />
                 </div>
+                {(customWidth ||
+                  ![0, 800, 1080, 1600, 1920, 2560].includes(
+                    settings.maxWidth,
+                  )) && (
+                  <div className="custom-width">
+                    <label className="field-label" htmlFor="custom-width">
+                      WIDTH IN PIXELS
+                    </label>
+                    <input
+                      className="text-input"
+                      id="custom-width"
+                      type="number"
+                      min="1"
+                      max="8192"
+                      value={settings.maxWidth}
+                      onChange={(event) =>
+                        updateSettings({
+                          ...settings,
+                          maxWidth: Math.min(
+                            8192,
+                            Math.max(1, Number(event.target.value)),
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                )}
                 <p className="field-hint">
                   Proportions stay the same. Never upscaled.
                 </p>
               </div>
+              <AdvancedSettings settings={settings} onChange={updateSettings} />
             </fieldset>
             <div className="settings-note">
               <ShieldCheck size={19} />
@@ -646,8 +725,37 @@ function App() {
             )}
 
             {items.length > 0 && (
+              <div className="batch-toolbar">
+                <label className="search-field">
+                  <Search size={16} />
+                  <input
+                    type="search"
+                    aria-label="Search images"
+                    placeholder="Find an image…"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </label>
+                <div className="select-wrap">
+                  <select
+                    aria-label="Sort images"
+                    value={sort}
+                    onChange={(event) => setSort(event.target.value)}
+                  >
+                    <option value="added">Upload order</option>
+                    <option value="name">Name A–Z</option>
+                    <option value="size">Largest first</option>
+                  </select>
+                  <ChevronDown size={14} />
+                </div>
+              </div>
+            )}
+            {items.length > 0 && (
               <div className="file-list" aria-label="Image files">
-                {items.map((item) => {
+                {visibleItems.length === 0 && (
+                  <p className="no-results">No images match “{query}”.</p>
+                )}
+                {visibleItems.map((item) => {
                   const delta = item.output
                     ? Math.round(
                         (1 - item.output.blob.size / item.file.size) * 100,
@@ -671,6 +779,9 @@ function App() {
                             <>
                               <s>{formatBytes(item.file.size)}</s>{' '}
                               {formatBytes(item.output.blob.size)}
+                              {settings.targetKB > 0 &&
+                                settings.format !== 'png' &&
+                                ` · Q${item.output.quality}%`}
                             </>
                           ) : (
                             formatBytes(item.file.size)
@@ -678,6 +789,20 @@ function App() {
                         </p>
                         {item.error && (
                           <p className="file-error">{item.error}</p>
+                        )}
+                        {hasEdits(item.edits) && (
+                          <span className="edited-tag">
+                            <Crop size={11} />
+                            {item.edits.cropRatio !== 'original'
+                              ? `${item.edits.cropRatio} crop`
+                              : 'Edited'}
+                            {item.edits.rotation > 0
+                              ? ` · ${item.edits.rotation}°`
+                              : ''}
+                          </span>
+                        )}
+                        {item.output?.warning && (
+                          <p className="file-warning">{item.output.warning}</p>
                         )}
                       </div>
                       {item.output && (
@@ -688,6 +813,15 @@ function App() {
                         </span>
                       )}
                       <div className="file-actions">
+                        <button
+                          className="icon-button edit-button"
+                          disabled={locked}
+                          aria-label={`Edit ${item.file.name}`}
+                          title="Crop, rotate, and preview"
+                          onClick={() => setEditId(item.id)}
+                        >
+                          <Crop size={17} />
+                        </button>
                         {item.output && (
                           <>
                             <button
@@ -756,6 +890,18 @@ function App() {
               <span>
                 <LockKeyhole size={13} /> Only on your device
               </span>
+              {busy && (
+                <button
+                  className="text-button stop-button"
+                  disabled={stopping}
+                  onClick={() => {
+                    cancelBatch.current = true;
+                    setStopping(true);
+                  }}
+                >
+                  {stopping ? 'Stopping…' : 'Stop batch'}
+                </button>
+              )}
               {completed.length > 0 &&
               completed.length === items.length &&
               !busy ? (
@@ -909,11 +1055,16 @@ function App() {
           </div>
         </div>
         <div className="help-note">
-          A few things to know: PNG is lossless, so its quality slider is
-          disabled. JPG fills transparent areas with white. Re-encoding removes
-          embedded metadata and may change color appearance. Some images may
-          become larger; savings depend on the source and settings. Animated
-          WebP exports as a still image.
+          Open an image's editor to crop, rotate, flip, and preview watermarks.
+          Export options let you set a filename prefix and aim for a target
+          size. Targets lower quality but never exceed your chosen maximum
+          quality; targets that cannot be reached show a warning. You can stop a
+          batch after the current image finishes and resume it later. A few
+          things to know: PNG is lossless, so its quality slider is disabled.
+          JPG fills transparent areas with white. Re-encoding removes embedded
+          metadata and may change color appearance. Some images may become
+          larger; savings depend on the source and settings. Animated WebP
+          exports as a still image.
         </div>
         <button
           className="button button-primary"
@@ -922,6 +1073,16 @@ function App() {
           Got it. Let's make something.
         </button>
       </dialog>
+
+      {editing && (
+        <EditorDialog
+          key={editing.id}
+          item={editing}
+          settings={settings}
+          onSave={applyEdits}
+          onClose={() => setEditId(null)}
+        />
+      )}
 
       <dialog
         ref={compareRef}

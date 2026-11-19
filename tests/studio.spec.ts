@@ -57,13 +57,11 @@ test('invalid inputs, transparency, duplicate names, and setting persistence', a
   page,
 }) => {
   await page.goto('/');
-  await page
-    .locator('input[type=file]')
-    .setInputFiles({
-      name: 'invalid.txt',
-      mimeType: 'text/plain',
-      buffer: Buffer.from('hello'),
-    });
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'invalid.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('hello'),
+  });
   await expect(page.getByRole('alert')).toContainText(
     'use a JPG, PNG, or WebP',
   );
