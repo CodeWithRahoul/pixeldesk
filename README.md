@@ -2,6 +2,8 @@
 
 A free browser-based image studio. Resize, compress, convert, compare, and download batches of images without an account or uploading files to a server.
 
+**Live demo:** [pixeldesk-beige.vercel.app](https://pixeldesk-beige.vercel.app)
+
 ![PixelDesk image studio](artifacts/studio-preview.png)
 
 [See the crop and watermark editor](artifacts/studio-editor.png).
