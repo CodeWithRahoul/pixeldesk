@@ -145,7 +145,11 @@ The repository includes a `vercel.json` configuration:
 
 You can also run `npx vercel` from the project directory and follow the prompts. See the [official Vercel guide for Vite](https://vercel.com/docs/frameworks/frontend/vite).
 
-Automatic deployments require connecting the repository in the Vercel project's Git settings and granting the Vercel GitHub App access. A repository being public does not itself establish this connection. See [Vercel's GitHub integration documentation](https://vercel.com/docs/git/vercel-for-github).
+### Continuous deployment
+
+This repository is connected to the **PixelDesk** project on Vercel. Pushing a commit to **`main`** triggers a production deployment to the live demo URL. Other branches and pull requests use preview deployments through the GitHub integration.
+
+For your own fork, connect it in your Vercel project's Git settings and grant the Vercel GitHub App access to the repository. See [Vercel's GitHub integration documentation](https://vercel.com/docs/git/vercel-for-github).
 
 ## Architecture
 
